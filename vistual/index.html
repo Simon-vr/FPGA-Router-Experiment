@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>FPGA Routing Visualizer</title>
+<style>
+  :root { --bg:#060a18; --card:#121b40; --border:rgba(116,140,235,.25); --text:#e7ecff; --muted:#96a3ce; --accent:#7c5cff; --accent2:#3b82f6; --mono:Consolas,Menlo,monospace; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.6 system-ui,"PingFang SC","Microsoft YaHei",sans-serif; color:var(--text); background:radial-gradient(900px 500px at 10% -10%,rgba(124,92,255,.22),transparent 60%),radial-gradient(800px 500px at 95% 0,rgba(59,130,246,.18),transparent 55%),var(--bg); }
+  .wrap { max-width:1100px; margin:0 auto; padding:24px 18px 48px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:20px; }
+  .panel { background:rgba(19,28,62,.62); border:1px solid var(--border); border-radius:14px; padding:16px; margin-bottom:16px; }
+  .row { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin-bottom:12px; }
+  label { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
+  select { background:#0c1330; color:var(--text); border:1px solid rgba(140,165,255,.42); border-radius:8px; padding:8px 10px; font:inherit; }
+  input[type=range] { flex:1; min-width:180px; accent-color:var(--accent); }
+  button { font:inherit; cursor:pointer; border-radius:9px; padding:8px 14px; border:1px solid rgba(140,165,255,.42); background:rgba(255,255,255,.03); color:var(--text); }
+  button.active, button.primary { background:linear-gradient(135deg,var(--accent),var(--accent2)); border-color:transparent; color:#fff; }
+  .seg { display:inline-flex; border:1px solid rgba(140,165,255,.42); border-radius:9px; overflow:hidden; }
+  .seg button { border:0; border-radius:0; }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px; margin-top:12px; }
+  .stat { background:rgba(8,13,32,.7); border:1px solid var(--border); border-radius:10px; padding:8px 10px; }
+  .stat .k { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
+  .stat .v { font-family:var(--mono); font-size:15px; color:#22d3ee; }
+  #grid { display:block; width:100%; height:auto; background:#080d20; border:1px solid var(--border); border-radius:12px; }
+  #status { min-height:20px; font-size:13px; color:var(--muted); margin-top:10px; }
+  #status.err { color:#fb7185; }
+  .chart { margin-top:12px; background:rgba(8,13,32,.6); border:1px solid var(--border); border-radius:10px; padding:10px; }
+  .chart .t { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-bottom:4px; }
+  .chart svg { display:block; width:100%; height:120px; }
+  .note { color:var(--muted); font-size:12px; margin-top:14px; }
+  code { font-family:var(--mono); color:#c4a7ff; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>FPGA Routing 可视化 / Visualizer</h1>
+  <div class="sub">读取 <code>docs/data/*.json</code> 抽样逐步数据 · 仅静态展示，不生成新 JSON</div>
+
+  <div class="panel">
+    <div class="row">
+      <label for="folder">可视化目录</label>
+      <select id="folder">
+        <option value="huge">huge</option>
+        <option value="large_dense">large_dense</option>
+        <option value="large_sparse">large_sparse</option>
+      </select>
+      <button id="load" class="primary">加载</button>
+    </div>
+    <div class="row">
+      <label>步骤</label>
+      <input id="range" type="range" min="0" max="0" value="0" />
+      <span id="stepText" class="sub" style="margin:0">0 / 0</span>
+    </div>
+    <div class="row">
+      <div class="seg">
+        <button id="heatBtn" class="active">热力图</button>
+        <button id="congBtn">拥塞图</button>
+      </div>
+      <button id="play">▶ 播放</button>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="k">标签</div><div class="v" id="dLabel">—</div></div>
+      <div class="stat"><div class="k">网格</div><div class="v" id="dGrid">—</div></div>
+      <div class="stat"><div class="k">Tracks</div><div class="v" id="dTracks">—</div></div>
+      <div class="stat"><div class="k">资源占用</div><div class="v" id="dUsage">—</div></div>
+    </div>
+    <div id="status"></div>
+  </div>
+
+  <svg id="grid" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet"></svg>
+
+  <div class="chart"><div class="t">拥塞下降曲线</div><svg id="congChart" viewBox="0 0 600 120"></svg></div>
+  <div class="chart"><div class="t">资源占用上升曲线</div><svg id="usageChart" viewBox="0 0 600 120"></svg></div>
+
+  <div class="note">若无法加载，请在仓库根目录启动 <code>python3 -m http.server 8000</code>，再访问 <code>http://localhost:8000/vistual/index.html</code>。</div>
+</div>
+
+<script>
+(function () {
+  const NS = "http://www.w3.org/2000/svg";
+  const el = (n, a) => { const e = document.createElementNS(NS, n); for (const k in a) e.setAttribute(k, a[k]); return e; };
+  const clear = n => { while (n.firstChild) n.removeChild(n.firstChild); };
+  const $ = id => document.getElementById(id);
+
+  const grid = $("grid"), range = $("range"), status = $("status");
+  let manifest = null, idx = 0, mode = "heat", timer = null;
+
+  const heat = (occ, cap) => {
+    const r = cap > 0 ? Math.min(1, occ / cap) : 0;
+    const red = Math.round(59 + r * 196), green = Math.round(130 - r * 60), blue = Math.round(246 - r * 100);
+    return `rgb(${red},${green},${blue})`;
+  };
+  const cong = (v, max) => {
+    const p = max > 0 ? v / max : 0;
+    return `rgb(${Math.round(13 + p * 230)},${Math.round(19 + p * 140)},${Math.round(51 + p * 20)})`;
+  };
+
+  function setStatus(msg, err) { status.textContent = msg || ""; status.classList.toggle("err", !!err); }
+
+  function render() {
+    if (!manifest) return;
+    const d = manifest.steps[idx];
+    const cols = manifest.grid_width, rows = manifest.grid_height;
+    const cell = Math.max(6, Math.floor(680 / Math.max(cols, rows))), margin = 1.5;
+    const w = margin * 2 + cols * cell, h = margin * 2 + rows * cell;
+    clear(grid); grid.setAttribute("viewBox", `0 0 ${w} ${h}`);
+    grid.appendChild(el("rect", { x: 0, y: 0, width: w, height: h, fill: "#0a0f28" }));
+
+    let maxCong = 0, used = 0, cap = 0;
+    for (const t of d.tiles) { if (t.congestion_ratio > maxCong) maxCong = t.congestion_ratio; used += t.occupancy; cap += t.capacity; }
+
+    const frag = document.createDocumentFragment();
+    for (const t of d.tiles) {
+      const r = el("rect", { x: margin + t.x * cell, y: margin + t.y * cell, width: cell, height: cell,
+        fill: mode === "heat" ? heat(t.occupancy, t.capacity) : cong(t.congestion_ratio, maxCong),
+        stroke: "rgba(150,170,255,.12)", "stroke-width": .4 });
+      const title = el("title");
+      title.textContent = `(${t.x},${t.y}) occ ${t.occupancy}/${t.capacity} cong ${t.congestion_ratio}`;
+      r.appendChild(title); frag.appendChild(r);
+    }
+    grid.appendChild(frag);
+
+    $("dLabel").textContent = d.label;
+    $("dGrid").textContent = `${cols}×${rows}`;
+    $("dTracks").textContent = manifest.tracks;
+    $("dUsage").textContent = `${(cap > 0 ? used * 100 / cap : 0).toFixed(1)}%`;
+    $("stepText").textContent = `${idx} / ${manifest.steps.length - 1}`;
+    drawCharts();
+  }
+
+  function histIndexOf(label) {
+    if (label === "initial") return 0;
+    const m = /^iter_(\d+)$/.exec(label || "");
+    if (m) return parseInt(m[1], 10);
+    return Math.max(0, (manifest.congestion_history || []).length - 1);
+  }
+
+  function drawCharts() {
+    const hist = histIndexOf(manifest.steps[idx].label);
+    chart($("congChart"), manifest.congestion_history, [192, 38, 211], hist);
+    chart($("usageChart"), manifest.resource_usage_history, [34, 211, 238], hist);
+  }
+
+  function chart(svg, data, rgb, cur) {
+    clear(svg);
+    if (!data || !data.length) return;
+    const W = svg.clientWidth || 600, H = 120, pad = { t: 12, r: 12, b: 20, l: 38 };
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    const pw = W - pad.l - pad.r, ph = H - pad.t - pad.b;
+    const min = Math.min(...data), max = Math.max(...data), range = (max - min) || 1;
+    const xAt = i => pad.l + pw * i / Math.max(1, data.length - 1);
+    const yAt = v => pad.t + ph * (1 - (v - min) / range);
+    svg.appendChild(el("line", { x1: pad.l, y1: pad.t, x2: pad.l, y2: H - pad.b, stroke: "rgba(150,170,255,.25)" }));
+    svg.appendChild(el("line", { x1: pad.l, y1: H - pad.b, x2: W - pad.r, y2: H - pad.b, stroke: "rgba(150,170,255,.25)" }));
+    let line = "";
+    data.forEach((v, i) => { line += (i ? "L" : "M") + xAt(i).toFixed(1) + " " + yAt(v).toFixed(1); });
+    svg.appendChild(el("path", { d: line, fill: "none", stroke: `rgb(${rgb})`, "stroke-width": 1.8 }));
+    if (cur >= 0 && cur < data.length) {
+      svg.appendChild(el("line", { x1: xAt(cur), y1: pad.t, x2: xAt(cur), y2: H - pad.b, stroke: "rgba(255,255,255,.35)", "stroke-dasharray": "3 3" }));
+      svg.appendChild(el("circle", { cx: xAt(cur), cy: yAt(data[cur]), r: 3.4, fill: "#fff", stroke: `rgb(${rgb})`, "stroke-width": 2 }));
+    }
+  }
+
+  async function load() {
+    stop();
+    const scenario = $("folder").value;
+    setStatus("加载中…");
+    try {
+      const res = await fetch(`../docs/data/${scenario}.json`, { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      // docs/data stores tiles as compact arrays [x,y,occupancy,capacity,congestion_ratio]
+      json.steps.forEach(s => {
+        if (s && s.tiles) s.tiles = s.tiles.map(t => Array.isArray(t)
+          ? { x: t[0], y: t[1], occupancy: t[2], capacity: t[3], congestion_ratio: t[4] } : t);
+      });
+      manifest = json;
+      idx = 0;
+      range.min = 0; range.max = manifest.steps.length - 1; range.value = 0;
+      render();
+      setStatus(`已加载 ${scenario}（${manifest.grid_width}×${manifest.grid_height}, W=${manifest.tracks}, ${manifest.steps.length} 个抽样步骤）`);
+    } catch (e) {
+      manifest = null; clear(grid); clear($("congChart")); clear($("usageChart"));
+      setStatus(`加载失败：${e.message}（请在仓库根目录启动 HTTP 服务）`, true);
+    }
+  }
+
+  function showStep(i) { if (!manifest) return; idx = i; render(); }
+
+  function stop() { if (timer) { clearInterval(timer); timer = null; } $("play").textContent = "▶ 播放"; }
+  function play() {
+    if (!manifest) return;
+    if (timer) { stop(); return; }
+    if (idx >= manifest.steps.length - 1) idx = 0;
+    $("play").textContent = "⏸ 暂停";
+    timer = setInterval(() => {
+      if (idx < manifest.steps.length - 1) { idx++; range.value = idx; render(); }
+      else stop();
+    }, 800);
+  }
+
+  // wire up
+  $("load").addEventListener("click", load);
+  range.addEventListener("input", () => { stop(); showStep(Number(range.value)); });
+  $("heatBtn").addEventListener("click", () => { mode = "heat"; $("heatBtn").classList.add("active"); $("congBtn").classList.remove("active"); render(); });
+  $("congBtn").addEventListener("click", () => { mode = "congestion"; $("congBtn").classList.add("active"); $("heatBtn").classList.remove("active"); render(); });
+  $("play").addEventListener("click", play);
+  window.addEventListener("resize", () => { if (manifest) drawCharts(); });
+
+  load();
+})();
+</script>
+</body>
+</html>

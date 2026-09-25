@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="zh" data-lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>算法原理 · FPGA 协商布线器</title>
+<meta name="description" content="Detailed principles of the FPGA router: RR-graph modeling, sortNets, Kruskal MST, BFS, A*, Mikami-Tabuchi and PathFinder negotiated routing with OpenMP." />
+<link rel="stylesheet" href="styles.css" />
+<script>
+  (function () {
+    try {
+      var t = localStorage.getItem('fpga-router-theme');
+      if (t !== 'dark' && t !== 'light') {
+        t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+      var l = localStorage.getItem('fpga-router-lang');
+      if (l === 'en' || l === 'zh') document.documentElement.setAttribute('data-lang', l);
+    } catch (e) {}
+  })();
+</script>
+</head>
+<body data-title-en="Algorithm Principles · FPGA Negotiated Router" data-title-zh="算法原理 · FPGA 协商布线器">
+
+<!-- ===================== HEADER ===================== -->
+<header class="site-header">
+  <div class="header-inner">
+    <a class="brand" href="index.html">
+      <span class="brand-name">FPGA Router</span>
+      <span class="brand-tag">
+        <span class="lang-en">Detailed algorithm notes</span>
+        <span class="lang-zh">算法原理详解</span>
+      </span>
+    </a>
+    <div class="header-actions">
+      <nav class="lang-switch" aria-label="Language">
+        <button type="button" data-lang-btn="en">English</button>
+        <span class="lang-sep">/</span>
+        <button type="button" data-lang-btn="zh">中文</button>
+      </nav>
+      <button id="themeToggle" class="theme-toggle" type="button" aria-label="Toggle theme" title="Toggle theme"><span id="themeIcon">🌙</span></button>
+    </div>
+  </div>
+</header>
+
+<div class="layout">
+  <!-- ---------- Sidebar TOC ---------- -->
+  <details class="toc" open>
+    <summary class="toc-summary"><span class="lang-en">Contents</span><span class="lang-zh">目录</span></summary>
+    <nav class="sidebar" aria-label="Table of contents">
+      <ul class="nav">
+        <li class="nav-feature"><a href="index.html"><span class="lang-en">← Back to home</span><span class="lang-zh">← 返回主页</span></a></li>
+        <li><a href="#notation"><span class="lang-en">0 · Notation</span><span class="lang-zh">0 · 记号</span></a></li>
+        <li><a href="#model"><span class="lang-en">1 · Problem &amp; RR graph</span><span class="lang-zh">1 · 问题与 RR 图</span></a></li>
+        <li><a href="#sortnets"><span class="lang-en">2 · Global routing · sortNets</span><span class="lang-zh">2 · 全局布线 · sortNets</span></a></li>
+        <li><a href="#mst"><span class="lang-en">3 · Net decomposition · MST</span><span class="lang-zh">3 · 网表拆分 · MST</span></a></li>
+        <li><a href="#bfs"><span class="lang-en">4 · BFS maze routing</span><span class="lang-zh">4 · BFS 迷宫布线</span></a></li>
+        <li><a href="#astar"><span class="lang-en">5 · A* heuristic search</span><span class="lang-zh">5 · A* 启发式搜索</span></a></li>
+        <li><a href="#mikami"><span class="lang-en">6 · Mikami-Tabuchi line search</span><span class="lang-zh">6 · Mikami-Tabuchi 线搜索</span></a></li>
+        <li><a href="#pathfinder"><span class="lang-en">7 · PathFinder negotiated routing</span><span class="lang-zh">7 · PathFinder 协商布线</span></a></li>
+        <li><a href="#parallel"><span class="lang-en">8 · OpenMP parallelization</span><span class="lang-zh">8 · OpenMP 并行化</span></a></li>
+        <li><a href="#complexity"><span class="lang-en">9 · Complexity &amp; measurements</span><span class="lang-zh">9 · 复杂度与实测</span></a></li>
+      </ul>
+      <div class="nav-note">
+        <div class="lang-en">Principles · pseudocode · measured notes</div>
+        <div class="lang-zh">原理 · 伪代码 · 实测对照</div>
+      </div>
+    </nav>
+  </details>
+
+  <!-- ---------- Content ---------- -->
+  <main class="content">
+    <article class="markdown-body">
+
+      <h1>
+        <span class="lang-en">Algorithm principles</span>
+        <span class="lang-zh">算法原理详解</span>
+      </h1>
+      <p class="lead" style="color:var(--text-soft);max-width:64ch">
+        <span class="lang-en">This page explains the idea, the exact implementation in this repository, the pseudocode and the cost of every routing stage — from RR-graph modeling to the parallel PathFinder negotiated router. Measured numbers appear on the home page.</span>
+        <span class="lang-zh">本页解释本项目每一个布线阶段的思路、具体实现、伪代码与复杂度——从 RR 图建模一直到并行的 PathFinder 协商布线器。实测数字见主页。</span>
+      </p>
+
+      <!-- ============ 0 NOTATION ============ -->
+      <section>
+        <h2 id="notation"><span class="lang-en">0 · Notation</span><span class="lang-zh">0 · 记号约定</span></h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th><span class="lang-en">symbol</span><span class="lang-zh">符号</span></th>
+                <th><span class="lang-en">meaning</span><span class="lang-zh">含义</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td class="mono">G = (V, E)</td><td><span class="lang-en">routing-resource (RR) graph of one tile grid</span><span class="lang-zh">整张 tile 网格的布线资源（RR）图</span></td></tr>
+              <tr><td class="mono">v ∈ V</td><td><span class="lang-en">a wire segment or logic pin (an RR node)</span><span class="lang-zh">一个导线段或逻辑引脚（一个 RR 节点）</span></td></tr>
+              <tr><td class="mono">N</td><td><span class="lang-en">number of nets in the design</span><span class="lang-zh">设计中线网数量</span></td></tr>
+              <tr><td class="mono">W</td><td><span class="lang-en">routing channel width (tracks per tile)</span><span class="lang-zh">布线通道宽度（每个 tile 的轨道数）</span></td></tr>
+              <tr><td class="mono">cap(v)</td><td><span class="lang-en">capacity of node v; in this model cap = 1</span><span class="lang-zh">节点 v 的容量；本模型 cap = 1</span></td></tr>
+              <tr><td class="mono">occ(v)</td><td><span class="lang-en">current-iteration occupancy of v</span><span class="lang-zh">v 在当前迭代的占用数</span></td></tr>
+              <tr><td class="mono">h(v)</td><td><span class="lang-en">historical cost of v (starts at 1.0)</span><span class="lang-zh">v 的历史代价（初值 1.0）</span></td></tr>
+              <tr><td class="mono">t</td><td><span class="lang-en">iteration index of the negotiated loop</span><span class="lang-zh">协商迭代轮次</span></td></tr>
+              <tr><td class="mono">P</td><td><span class="lang-en">number of terminals (source + sinks) of one net</span><span class="lang-zh">单条线网的端点数（source + sinks）</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ============ 1 MODEL ============ -->
+      <section>
+        <h2 id="model"><span class="lang-en">1 · Problem &amp; RR-graph modeling</span><span class="lang-zh">1 · 问题与 RR 图建模</span></h2>
+        <p>
+          <span class="lang-en">Given a placed FPGA design, routing connects the source of every net to all of its sinks using only available routing resources. This is not a single shortest-path problem: many nets compete for the same limited wires, so a route that is short for one net can block several others. The task is therefore to build a connected sub-graph per net such that no resource is over-used.</span>
+          <span class="lang-zh">在布局完成之后，布线要把每条线网的 source 与全部 sink 连接起来，且只能使用可用的布线资源。它不是单条最短路问题：多条线网会争抢有限的导线资源，一条对自身很短的路径可能堵死其它线网。因此任务是为每条线网构造一棵连通子图，同时保证没有资源被过度占用。</span>
+        </p>
+        <p>
+          <span class="lang-en">The fabric is modeled as an N×N tile grid, and every tile contributes three kinds of RR nodes. Edges (<code>connections</code>) represent programmable switches between nodes.</span>
+          <span class="lang-zh">布线资源被建模为 N×N 的 tile 网格，每个 tile 提供三类 RR 节点；节点之间的边（<code>connections</code>）表示可编程开关。</span>
+        </p>
+        <div class="grid grid-3">
+          <div class="card">
+            <h3>H_WIRE</h3>
+            <p class="lang-en">Horizontal wire segment. Used for horizontal travel and horizontal line extensions.</p>
+            <p class="lang-zh">水平导线段，用于水平走线与水平方向的线搜索扩展。</p>
+          </div>
+          <div class="card">
+            <h3>V_WIRE</h3>
+            <p class="lang-en">Vertical wire segment. Used for vertical travel and vertical line extensions.</p>
+            <p class="lang-zh">垂直导线段，用于垂直走线与垂直方向的线搜索扩展。</p>
+          </div>
+          <div class="card">
+            <h3>CB_WIRE</h3>
+            <p class="lang-en">Connection block / logic pin. The source/sink of a net and the turn point between horizontal and vertical wires.</p>
+            <p class="lang-zh">连接块 / 逻辑引脚，是线网的 source/sink，也是水平与垂直导线之间的转向点。</p>
+          </div>
+        </div>
+        <p>
+          <span class="lang-en">Occupation is stored directly on the node: <code>RRNode::net</code> is <code>nullptr</code> when free and points to the owning net otherwise. A net's path is a list of RR nodes; <code>finalizeRouting()</code> marks them as used. This simple representation is what makes the three detail routers interchangeable: they only differ in how they search for a path, not in how a path is stored.</span>
+          <span class="lang-zh">资源占用直接记录在节点上：空闲时 <code>RRNode::net</code> 为 <code>nullptr</code>，否则指向占用它的线网。线网路径是一串 RR 节点，<code>finalizeRouting()</code> 把它们标记为已占用。正是这种简单表示让三种详细布线器可以互换：它们的区别只在“如何搜索路径”，而不在“如何存储路径”。</span>
+        </p>
+        <div class="callout">
+          <p class="lang-en"><strong>Overlap is allowed between nets during negotiated routing.</strong> In the PathFinder stage, several nets may temporarily share a node; a node is only judged congested when <code>occ(v) &gt; cap(v)</code>.</p>
+          <p class="lang-zh"><strong>协商布线允许线网之间临时重叠。</strong>在 PathFinder 阶段，多个线网可以暂时共用一个节点；只有当 <code>occ(v) &gt; cap(v)</code> 时才判定为拥塞。</p>
+        </div>
+      </section>
+
+      <!-- ============ 2 sortNets ============ -->
+      <section>
+        <h2 id="sortnets"><span class="lang-en">2 · Global routing · sortNets</span><span class="lang-zh">2 · 全局布线 · sortNets</span></h2>
+        <p>
+          <span class="lang-en">Global routing decides <em>in which order</em> nets are routed. The intuition is that a net whose terminals are packed inside a small region is easily surrounded and blocked by later routes, so it should be routed early. The heuristic measures, for each net, how many global pins fall inside its bounding box (BBOX): the more crowded the box, the higher the priority.</span>
+          <span class="lang-zh">全局布线决定线网的<em>布线顺序</em>。直觉是：端点在空间上越紧凑的线网越容易被后续线网包围、堵死，因此应优先布线。该启发式统计每条线网的 bounding box（BBOX）内落入了多少个全局引脚：box 内越拥挤，优先级越高。</span>
+        </p>
+        <div class="algo">
+          <div class="algo-head">
+            <h3>sortNets</h3>
+            <span class="algo-meta">O(P log P + Σ k<sub>n</sub>)</span>
+          </div>
+          <p class="lang-en">All pins are collected into one pool and sorted by x. For a net, the x-range of its BBOX is located with binary search, then the y values inside that range are counted. Nets are sorted by this count ascending. The strategy is currently kept as an optional switch (<code>sortNets()</code> is commented out in the default path) for comparison studies.</p>
+          <p class="lang-zh">把所有引脚收集到一个池中并按 x 排序。对一条线网，先用二分找到其 BBOX 的 x 区间，再在该区间内统计 y 坐标落在 BBOX 内的引脚数量；按该计数升序排列线网。该策略目前保留为可选开关（默认路径中 <code>sortNets()</code> 被注释掉），用于对比实验。</p>
+          <pre class="pseudo"><span class="cm"># 1. build a global pin pool sorted by x</span>
+pins = all source + sink pins of all nets
+sort pins by x
+
+<span class="cm"># 2. rank each net by BBOX density</span>
+<span class="kw">for</span> each net n:
+    bbox = min/max of n.terminals
+    lo = lower_bound(pins.x, bbox.xmin)
+    hi = upper_bound(pins.x, bbox.xmax)
+    count = 0
+    <span class="kw">for</span> p <span class="kw">in</span> pins[lo .. hi):
+        <span class="kw">if</span> p.y <span class="kw">in</span> [bbox.ymin, bbox.ymax]: count += 1
+    n.rank = count
+
+<span class="cm"># 3. route the tightest boxes first</span>
+sort nets by rank ascending</pre>
+        </div>
+        <p class="complexity">O(P log P)</p>
+        <p class="lang-en"><strong>Trade-off.</strong> Ordering helps most when resources are tight, but it is a global greedy heuristic: a good order for one region may be poor for another. It is complementary to — not a replacement for — the negotiated rip-up/reroute loop.</p>
+        <p class="lang-zh"><strong>权衡。</strong>顺序策略在资源紧张时收益最大，但它仍是全局贪心：对某个区域的好顺序可能对另一区域并不好。它与协商式 rip-up/reroute 闭环互补，而非替代。</p>
+      </section>
+
+      <!-- ============ 3 MST ============ -->
+      <section>
+        <h2 id="mst"><span class="lang-en">3 · Net decomposition · Kruskal MST</span><span class="lang-zh">3 · 网表拆分 · Kruskal 最小生成树</span></h2>
+        <p>
+          <span class="lang-en">A multi-terminal net cannot be routed by connecting each sink independently to the source, because that would consume the source's neighbourhood repeatedly instead of sharing branches. The standard decomposition builds a <strong>minimum spanning tree</strong> (MST) over the terminals, then routes each tree edge as an independent two-terminal problem.</span>
+          <span class="lang-zh">多端线网若把每个 sink 都单独连到 source，会反复消耗 source 周围的资源，无法共享分支。标准做法是在所有端点上构造一棵<strong>最小生成树</strong>（MST），再把每条树边当作独立的两端问题来布线。</span>
+        </p>
+        <div class="algo">
+          <div class="algo-head">
+            <h3>Kruskal MST with Manhattan weights</h3>
+            <span class="algo-meta">O(P² log P)</span>
+          </div>
+          <p class="lang-en">Terminals form the vertices of a complete graph; the weight of an edge is the Manhattan distance between its endpoints. Kruskal sorts all P(P−1)/2 edges, unions components with a disjoint-set (union-find), and stops at P−1 edges. The implementation also checks that exactly P−1 edges were selected — otherwise it throws, catching duplicated or missing edges early.</p>
+          <p class="lang-zh">所有端点构成完全图的顶点，边权为两端点的 Manhattan 距离。Kruskal 对全部 P(P−1)/2 条边排序，用并查集（union-find）合并连通分量，选到 P−1 条边即停止。实现中还会严格检查是否恰好选出 P−1 条边，否则抛异常，从而尽早发现重复或缺失的边。</p>
+          <pre class="pseudo">MST(terminals):
+    edges = all unordered pairs (i, j), i != j
+    sort edges by manhattan(terminal[i], terminal[j])
+    parent[i] = i; rank[i] = 0        <span class="cm"># union-find</span>
+    tree = {}
+    <span class="kw">for</span> (i, j) <span class="kw">in</span> edges:
+        a = find(i); b = find(j)
+        <span class="kw">if</span> a == b: <span class="kw">continue</span>       <span class="cm"># would create a cycle</span>
+        union(a, b)
+        tree.add(i, j)
+        <span class="kw">if</span> |tree| == P - 1: <span class="kw">break</span>
+    <span class="kw">if</span> |tree| != P - 1: <span class="kw">error</span>
+    <span class="kw">return</span> tree</pre>
+        </div>
+        <p class="complexity">O(P² log P)</p>
+        <p class="lang-en"><strong>Why Manhattan?</strong> It matches the rectilinear grid and is a lower bound on the real path length, so short abstract edges tend to become short physical routes. Since the MST only fixes <em>which terminal pairs</em> are routed, the three detail routers still decide the actual geometry.</p>
+        <p class="lang-zh"><strong>为什么用 Manhattan？</strong>它与矩形网格一致，也是真实路径长度的下界，因此较短的抽象边通常对应较短的物理走线。MST 只决定“哪些端点对需要布线”，实际几何仍由三种详细布线器决定。</p>
+      </section>
+
+      <!-- ============ 4 BFS ============ -->
+      <section>
+        <h2 id="bfs"><span class="lang-en">4 · BFS maze routing</span><span class="lang-zh">4 · BFS 迷宫布线</span></h2>
+        <p>
+          <span class="lang-en">Breadth-first search (Lee's algorithm) explores the RR graph in waves of increasing hop count. Because every edge has unit cost, the first time the sink is reached the path uses the fewest hops. A <code>parent</code> map stores the BFS tree, and the path is reconstructed by walking parents from the sink back to the source.</span>
+          <span class="lang-zh">广度优先搜索（Lee 算法）以“跳数”逐层扩展 RS 图。由于每条边代价相同，第一次到达 sink 时的路径跳数最少。用 <code>parent</code> 映射保存 BFS 树，再从 sink 沿父指针回溯到 source 即可重建路径。</span>
+        </p>
+        <div class="algo">
+          <div class="algo-head">
+            <h3>BFS (shortest-hop)</h3>
+            <span class="algo-meta">O(V + E)</span>
+          </div>
+          <p class="lang-en">A node is only enqueued if it is unvisited and <em>free</em> (<code>!isUsed()</code>); this makes BFS a conservative availability checker. It has no cost model, so it cannot avoid a hotspot that is still "free" but about to become congested.</p>
+          <p class="lang-zh">只有“未访问且空闲”（<code>!isUsed()</code>）的节点才会入队，因此 BFS 是一种保守的可用性搜索。它没有代价模型，无法绕开那些“仍然空闲、但即将拥塞”的热点。</p>
+          <pre class="pseudo">BFS(source, sink):
+    parent[source] = source; queue = [source]
+    <span class="kw">while</span> queue not empty:
+        current = queue.pop_front()
+        <span class="kw">if</span> current == sink:
+            <span class="kw">return</span> reconstruct(parent, source, sink)
+        <span class="kw">for</span> neighbor <span class="kw">in</span> current.connections:
+            <span class="kw">if</span> neighbor not visited <span class="kw">and</span> neighbor is free:
+                parent[neighbor] = current
+                queue.push_back(neighbor)
+    <span class="kw">return</span> failure</pre>
+        </div>
+        <p class="complexity">O(V + E)</p>
+        <p class="lang-en"><strong>Measured.</strong> BFS is the most robust default: it passes <code>lg_sparse</code>, <code>large_dense</code>, <code>huge</code> (37 s, 46819 segments) and the tighter W=25 stress case.</p>
+        <p class="lang-zh"><strong>实测。</strong>BFS 是最稳健的默认方法：在 <code>lg_sparse</code>、<code>large_dense</code>、<code>huge</code>（37 s、46819 segments）以及更紧的 W=25 压力场景下均通过。</p>
+      </section>
+
+      <!-- ============ 5 A* ============ -->
+      <section>
+        <h2 id="astar"><span class="lang-en">5 · A* heuristic search</span><span class="lang-zh">5 · A* 启发式搜索</span></h2>
+        <p>
+          <span class="lang-en">A* is BFS with a guide. Each node keeps a known cost from the source, <code>g(v)</code>, and a heuristic estimate to the sink, <code>h(v) = manhattan(v, sink)</code>. The priority queue always expands the node with the smallest <code>f(v) = g(v) + h(v)</code>, so the search is pulled towards the sink instead of flooding in all directions.</span>
+          <span class="lang-zh">A* 是“带导航的 BFS”。每个节点维护从 source 已知的代价 <code>g(v)</code>，以及到 sink 的启发估计 <code>h(v) = manhattan(v, sink)</code>。优先队列每次扩展 <code>f(v) = g(v) + h(v)</code> 最小的节点，使搜索被拉向 sink，而不是向所有方向泛洪。</span>
+        </p>
+        <div class="algo">
+          <div class="algo-head">
+            <h3>A* (Manhattan heuristic)</h3>
+            <span class="algo-meta">O(E log V)</span>
+          </div>
+          <p class="lang-en">Manhattan distance is an admissible heuristic for unit-cost grid moves, so A* returns a shortest path for a <em>single</em> two-terminal problem. Globally, however, the greedy order in which nets consume resources can produce an inconsistent commit — a path that looked free while searching may collide with paths committed earlier or later.</p>
+          <p class="lang-zh">对于单位代价的网格移动，Manhattan 距离是可采纳启发式，因此对<em>单个</em>两端问题 A* 能返回最短路。但从全局看，线网消耗资源的贪心顺序可能导致提交不一致——搜索时看起来空闲的路径，可能与更早或更晚提交的路径发生冲突。</p>
+          <pre class="pseudo">A*(source, sink):
+    g[source] = 0; parent[source] = source
+    open = min-heap keyed by f = g + h
+    closed = empty set
+    open.push(source, manhattan(source, sink))
+    <span class="kw">while</span> open not empty:
+        current = open.pop_min()
+        <span class="kw">if</span> current <span class="kw">in</span> closed: <span class="kw">continue</span>   <span class="cm"># stale: a better g was found</span>
+        closed.add(current)
+        <span class="kw">if</span> current == sink:
+            <span class="kw">return</span> reconstruct(parent, source, sink)
+        <span class="kw">for</span> neighbor <span class="kw">in</span> current.connections:
+            <span class="kw">if</span> neighbor used by another net: <span class="kw">continue</span>
+            tentative = g[current] + 1
+            <span class="kw">if</span> tentative &lt; g[neighbor]:      <span class="cm"># relax, may re-open</span>
+                parent[neighbor] = current
+                g[neighbor] = tentative
+                open.push(neighbor, tentative + manhattan(neighbor, sink))
+    <span class="kw">return</span> failure</pre>
+        </div>
+        <p class="complexity">O(E log V)</p>
+        <p class="lang-en"><strong>Measured.</strong> A* is the fastest per-pair search and wins on <code>large_dense</code> (2 s vs 3 s). On <code>huge</code> it completes all 2307 connections and passes verification with <code>Segments = 46928</code> in about 23 s — essentially tied with Mikami-Tabuchi (22 s) and clearly faster than BFS (37 s).</p>
+        <p class="lang-zh"><strong>实测。</strong>A* 的单对搜索最快，在 <code>large_dense</code> 上 2 s 优于 BFS 的 3 s。在 <code>huge</code> 上完成全部 2307 条连接并通过验证（<code>Segments = 46928</code>，约 23 s），与 Mikami-Tabuchi（22 s）基本持平，明显快于 BFS（37 s）。</p>
+      </section>
+
+      <!-- ============ 6 MIKAMI ============ -->
+      <section>
+        <h2 id="mikami"><span class="lang-en">6 · Mikami-Tabuchi line search</span><span class="lang-zh">6 · Mikami-Tabuchi 线搜索</span></h2>
+        <p>
+          <span class="lang-en">Mikami-Tabuchi is a line-search (also called line-probe) router. Instead of expanding node-by-node, it grows fronts from <em>both</em> the source and the sink and tries to reach the target side as quickly as possible. In an FPGA fabric made of long horizontal and vertical segments, a front can jump along a whole straight wire instead of one hop at a time.</span>
+          <span class="lang-zh">Mikami-Tabuchi 是一种线搜索（line-probe）布线器。它不再逐节点扩展，而是从 source 与 sink <em>两端</em>同时生长前沿，尽快与对侧相遇。在由长水平/垂直导线段构成的 FPGA 结构里，一个前沿可以沿整段直线导线前进，而不是一跳一跳地走。</span>
+        </p>
+        <div class="algo">
+          <div class="algo-head">
+            <h3>Double-end line search</h3>
+            <span class="algo-meta">type-driven expansion</span>
+          </div>
+          <p class="lang-en">Expansion depends on node type: a <code>CB_WIRE</code> pin expands one step; an <code>H_WIRE</code> or <code>V_WIRE</code> continues straight along neighbours of the <em>same</em> type until the type changes or the wire is blocked. Two parent maps, <code>parentS</code> and <code>parentT</code>, record both trees; a node appearing in the opposite map is the meeting point. The path is the concatenation of the two half-paths.</p>
+          <p class="lang-zh">扩展规则取决于节点类型：<code>CB_WIRE</code> 引脚只走一步；<code>H_WIRE</code> 或 <code>V_WIRE</code> 沿<em>同类型</em>邻居直线延伸，直到类型变化或被阻挡。两棵搜索树分别用 <code>parentS</code> 与 <code>parentT</code> 记录；某节点出现在对侧父表中即为相遇点。最终路径由两段半路径拼接而成。</p>
+          <pre class="pseudo">Mikami(source, sink):
+    parentS[source] = source; frontierS = [source]
+    parentT[sink]   = sink;   frontierT = [sink]
+    meet = null
+    <span class="kw">while</span> frontierS and frontierT not empty and meet == null:
+        frontierS = expand(frontierS, parentS, parentT)
+        <span class="kw">if</span> meet: <span class="kw">break</span>
+        frontierT = expand(frontierT, parentT, parentS)
+    <span class="kw">if</span> meet == null: <span class="kw">return</span> failure
+    <span class="kw">return</span> path(source .. meet) + path(meet .. sink)
+
+expand(frontier, own, other):
+    next = []
+    <span class="kw">for</span> node <span class="kw">in</span> frontier:
+        <span class="kw">for</span> nb <span class="kw">in</span> node.connections:
+            <span class="kw">if</span> nb not traversable <span class="kw">or</span> nb <span class="kw">in</span> own: <span class="kw">continue</span>
+            own[nb] = node; next.push(nb)
+            <span class="kw">if</span> nb <span class="kw">in</span> other: meet = nb; <span class="kw">return</span> next
+            <span class="kw">if</span> nb.type <span class="kw">in</span> {H_WIRE, V_WIRE}:
+                extend straight along same type, adding to next
+    <span class="kw">return</span> next</pre>
+        </div>
+        <p class="complexity">O(V + E) worst case, far fewer expansions in practice</p>
+        <p class="lang-en"><strong>Measured.</strong> On <code>huge</code>, Mikami-Tabuchi completes verification in 22 s with 46769 segments, versus BFS's 37 s / 46819 segments — about 40% faster and slightly shorter. The straight-wire jumps avoid flooding the grid, which is exactly why line search suits rectilinear FPGA fabrics.</p>
+        <p class="lang-zh"><strong>实测。</strong>在 <code>huge</code> 上，Mikami-Tabuchi 用 22 s、46769 segments 完成验证；BFS 为 37 s、46819 segments——约快 40%，线长也略短。直线跳跃避免了对网格的泛洪，这正是线搜索适合矩形 FPGA 结构的原因。</p>
+      </section>
+
+      <!-- ============ 7 PATHFINDER ============ -->
+      <section>
+        <h2 id="pathfinder"><span class="lang-en">7 · PathFinder negotiated routing</span><span class="lang-zh">7 · PathFinder 协商布线</span></h2>
+        <p>
+          <span class="lang-en">The three detail routers above are all <em>one-shot</em>: once a path is committed it is never reconsidered. PathFinder makes routing iterative. Each round it <strong>rips up</strong> every net and <strong>reroutes</strong> it while charging extra for congested resources. Nets that fought over a node are pushed apart in later rounds until the design is conflict-free or the iteration budget is exhausted.</span>
+          <span class="lang-zh">上面三种详细布线器都是<em>一次性的</em>：路径一旦提交就不再改动。PathFinder 把布线变成迭代过程：每一轮先<strong>拆除</strong>所有线网，再在对拥塞资源加价的前提下<strong>重新布线</strong>。争抢同一节点的线网会在后续轮次被逐渐推开，直到无冲突或迭代预算用尽。</span>
+        </p>
+        <div class="algo">
+          <div class="algo-head">
+            <h3>Negotiated cost function</h3>
+            <span class="algo-meta">this repository's implementation</span>
+          </div>
+          <p class="lang-en">The cost of using node <code>v</code> in round <code>t</code> combines three pressures: a base cost, the accumulated <strong>historical cost</strong> <code>h(v)</code>, a <strong>present sharing penalty</strong> <code>p(v,t)</code> and an <strong>iteration factor</strong> that grows with <code>t</code>.</p>
+          <p class="lang-zh">第 <code>t</code> 轮使用节点 <code>v</code> 的代价由三部分压力叠加：基准代价、累计的<strong>历史代价</strong> <code>h(v)</code>、<strong>当前共享惩罚</strong> <code>p(v,t)</code>，以及随 <code>t</code> 增长的<strong>迭代因子</strong>。</p>
+          <div class="formula">
+            cost(v, t) = (1 + h(v)) · p(v, t) · (1 + 0.1 · t)
+          </div>
+          <p class="lang-en">Here <code>h(v)</code> starts at 1.0 and grows by 1 each round in which <code>v</code> was over-used. The sharing penalty is flat when the node was not shared in the previous round; otherwise it grows quadratically with the overflow, which makes the search back off congested nodes quickly.</p>
+          <p class="lang-zh">其中 <code>h(v)</code> 初值为 1.0，只要 <code>v</code> 在某一轮被过度占用就 +1。当上一轮未被共享时共享惩罚为常数 1；否则随溢出量二次增长，从而让搜索更快地避开拥塞节点。</p>
+          <div class="formula">
+            p(v, t) = 1 &nbsp;&nbsp;<span class="lang-en">if v was not shared last round</span><span class="lang-zh">若上一轮未被共享</span><br />
+            p(v, t) = 1 + 0.5 · (over + 1)² &nbsp;&nbsp;<span class="lang-en">otherwise, over = max(0, |prevIterNets(v)| − cap)</span><span class="lang-zh">否则，over = max(0, |prevIterNets(v)| − cap)</span>
+          </div>
+          <pre class="pseudo">negotiated():
+    h(v) = 1.0 <span class="kw">for</span> all v
+    <span class="kw">for</span> t = 0 .. maxiter - 1:
+        rip_up_all_nets()
+        occ(v) = 0 <span class="kw">for</span> all v
+        <span class="cm"># Phase A: parallel search (h(v) is read-only here)</span>
+        <span class="kw">parallel for</span> each net n:
+            localPath = []
+            <span class="kw">for</span> pair <span class="kw">in</span> MST(n):
+                negotiated_astar(pair, t, localPath)
+            tempPaths[n] = localPath
+        <span class="cm"># Phase B: serial commit</span>
+        <span class="kw">for</span> each net n:
+            n.path = tempPaths[n]
+            <span class="kw">for</span> v <span class="kw">in</span> n.path: prevIterNets(v) = {n}
+            n.finalizeRouting()
+        recordOccupancy()                 <span class="cm"># occ(v) = number of nets using v</span>
+        <span class="kw">if</span> no v with occ(v) &gt; cap(v): <span class="kw">return</span> converged
+        updateHistoricalCosts()           <span class="cm"># h(v) += 1 where over-used</span>
+    <span class="kw">return</span> unconverged</pre>
+        </div>
+        <p class="complexity">O(maxiter · (V + E) · N)</p>
+        <p class="lang-en"><strong>Convergence.</strong> A round is conflict-free when every node satisfies <code>occ(v) ≤ cap(v)</code>; the router then stops early. On <code>med_dense</code> it converges in 35 rounds at W=25 and 39 at W=30, but at W=20 it hits the 50-round limit — the critical width is between 20 and 25. On <code>large_dense</code> and <code>huge</code> it does not converge within 50 rounds; wider channels or more rounds (and a better cost model) would be needed.</p>
+        <p class="lang-zh"><strong>收敛判据。</strong>当所有节点满足 <code>occ(v) ≤ cap(v)</code> 时本轮无冲突，路由器提前结束。在 <code>med_dense</code> 上，W=25 用 35 轮、W=30 用 39 轮收敛；W=20 则达到 50 轮上限——临界宽度在 20–25 之间。在 <code>large_dense</code> 与 <code>huge</code> 上 50 轮内不收敛，需要更宽的通道、更多轮次以及更好的代价模型。</p>
+      </section>
+
+      <!-- ============ 8 PARALLEL ============ -->
+      <section>
+        <h2 id="parallel"><span class="lang-en">8 · OpenMP parallelization</span><span class="lang-zh">8 · OpenMP 并行化</span></h2>
+        <p>
+          <span class="lang-en">A round is split into two phases. <strong>Phase A (parallel)</strong> routes all nets, each thread writing only to its own thread-local path buffer, so there is no data race. <strong>Phase B (serial)</strong> commits those buffers into the global resource table, records occupancy and updates historical costs. Routing search is the expensive part and is parallel; state mutation is cheap and stays serial.</span>
+          <span class="lang-zh">一轮迭代拆成两个阶段。<strong>Phase A（并行）</strong>并行布线所有线网，每个线程只写自己的线程本地路径缓冲，因此没有数据竞争。<strong>Phase B（串行）</strong>把这些缓冲提交到全局资源表、统计占用并更新历史代价。搜索是耗时大头，并行处理；状态修改开销小，保持串行。</span>
+        </p>
+        <div class="algo">
+          <div class="algo-head">
+            <h3>route-in-parallel, commit-in-serial</h3>
+            <span class="algo-meta">#pragma omp parallel for schedule(dynamic)</span>
+          </div>
+          <p class="lang-en">During Phase A the historical cost <code>h(v)</code> is only read, never written, which is what makes the parallel phase safe. Each net's temporary path is written to <code>tempPaths_[i]</code>; the serial commit loop then calls <code>net-&gt;setPath()</code>, snapshots the previous-iteration owners with <code>prevIterNets</code>, and calls <code>finalizeRouting()</code>. Occupancy is counted once, serially, after all threads have joined.</p>
+          <p class="lang-zh">Phase A 中历史代价 <code>h(v)</code> 只读不写，这正是并行安全的关键。每条线网的临时路径写入 <code>tempPaths_[i]</code>；串行提交循环再调用 <code>net-&gt;setPath()</code>、用 <code>prevIterNets</code> 记录上一轮占用者，并调用 <code>finalizeRouting()</code>。占用统计在所有线程汇合后串行执行一次。</p>
+        </div>
+        <p class="lang-en"><strong>Determinism and speedup.</strong> Because the search only reads the previous round's state, the solution is independent of the number of threads: 4, 8 and 16 threads all converge in 35 iterations with <code>Segments = 2970</code>. Wall-clock time falls 7 → 4 → 3 s, i.e. about 2.33× from 4 to 16 threads. The speedup is sub-linear because the serial commit, occupancy and cost-update phases cannot be parallelized (Amdahl's law).</p>
+        <p class="lang-zh"><strong>确定性与加速比。</strong>由于搜索只读取上一轮状态，解与线程数无关：4、8、16 线程都在 35 轮收敛，<code>Segments = 2970</code> 完全一致。墙钟时间从 7 → 4 → 3 s，即 16 线程相对 4 线程约 2.33×。加速比低于线性，因为串行提交、占用统计与代价更新阶段无法并行（Amdahl 定律）。</p>
+      </section>
+
+      <!-- ============ 9 COMPLEXITY ============ -->
+      <section>
+        <h2 id="complexity"><span class="lang-en">9 · Complexity &amp; measured summary</span><span class="lang-zh">9 · 复杂度与实测对照</span></h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th><span class="lang-en">stage</span><span class="lang-zh">阶段</span></th>
+                <th><span class="lang-en">complexity</span><span class="lang-zh">复杂度</span></th>
+                <th><span class="lang-en">measured behaviour (2026-09-10)</span><span class="lang-zh">实测表现（2026-09-10）</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><span class="lang-en">sortNets</span><span class="lang-zh">sortNets</span></td>
+                <td class="mono">O(P log P)</td>
+                <td><span class="lang-en">Optional global ordering; helps most when resources are tight.</span><span class="lang-zh">可选的全局排序；资源紧张时收益最大。</span></td>
+              </tr>
+              <tr>
+                <td><span class="lang-en">Kruskal MST</span><span class="lang-zh">Kruskal MST</span></td>
+                <td class="mono">O(P² log P)</td>
+                <td><span class="lang-en">Union-find decomposition, asserted to P−1 edges.</span><span class="lang-zh">并查集拆分，严格校验为 P−1 条边。</span></td>
+              </tr>
+              <tr>
+                <td>BFS</td>
+                <td class="mono">O(V + E)</td>
+                <td><span class="lang-en">Passes lg_sparse / large_dense / huge and the tighter W=25 case; 37 s on huge.</span><span class="lang-zh">lg_sparse / large_dense / huge 及更紧的 W=25 均通过；huge 37 s。</span></td>
+              </tr>
+              <tr>
+                <td>A*</td>
+                <td class="mono">O(E log V)</td>
+                <td><span class="lang-en">Fastest per pair; passes huge (46928 segments).</span><span class="lang-zh">单对最快；huge 通过（46928 segments）。</span></td>
+              </tr>
+              <tr>
+                <td><span class="lang-en">Mikami-Tabuchi</span><span class="lang-zh">Mikami-Tabuchi</span></td>
+                <td class="mono">O(V + E)*</td>
+                <td><span class="lang-en">huge 22 s, 46769 segments — fastest verified result.</span><span class="lang-zh">huge 22 s、46769 segments——最快且验证通过。</span></td>
+              </tr>
+              <tr>
+                <td><span class="lang-en">PathFinder</span><span class="lang-zh">PathFinder</span></td>
+                <td class="mono">O(T · (V+E) · N)</td>
+                <td><span class="lang-en">med_dense converges (35–39 rounds); large/huge do not within 50.</span><span class="lang-zh">med_dense 收敛（35–39 轮）；large/huge 50 轮内不收敛。</span></td>
+              </tr>
+              <tr>
+                <td><span class="lang-en">OpenMP</span><span class="lang-zh">OpenMP</span></td>
+                <td class="mono">—</td>
+                <td><span class="lang-en">Deterministic solution; ~2.33× from 4 to 16 threads.</span><span class="lang-zh">解与线程数无关；4→16 线程约 2.33×。</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="table-note">
+          <span class="lang-en">* Worst case is linear in the graph; straight-wire extensions make the practical expansion count much smaller. See the home page for the full result tables.</span>
+          <span class="lang-zh">* 最坏情况与图规模线性；直线延伸使实际扩展数远小于该上界。完整结果表见主页。</span>
+        </p>
+        <div class="callout">
+          <p class="lang-en"><strong>Takeaways.</strong> (1) A good decomposition (MST) makes each detail router's job well-defined. (2) One-shot routers are fast but can fail after commit, so pairwise optimality is not global optimality. (3) Negotiation fixes that in principle but needs enough channel capacity. (4) Parallelizing the search while keeping commit serial preserves the result exactly.</p>
+          <p class="lang-zh"><strong>结论。</strong>(1) 好的拆分（MST）让每个详细布线器的任务定义清晰；(2) 一次性布线器快，但提交后可能失败，说明“单对最优”不等于“全局最优”；(3) 协商布线在原理上能解决该问题，但需要足够的通道容量；(4) 搜索并行、提交串行，可以精确保持解不变。</p>
+        </div>
+      </section>
+
+    </article>
+
+    <!-- ---------- FOOTER ---------- -->
+    <footer class="site-footer">
+      <div class="footer-inner">
+        <div>
+          <div class="lang-en">FPGA Negotiated Router · algorithm principles · <a href="index.html">back to home</a></div>
+          <div class="lang-zh">FPGA 协商布线器 · 算法原理 · <a href="index.html">返回主页</a></div>
+        </div>
+        <div>
+          <div class="lang-en">Measured results: 2026-09-10</div>
+          <div class="lang-zh">实测结果：2026-09-10</div>
+        </div>
+      </div>
+    </footer>
+  </main>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

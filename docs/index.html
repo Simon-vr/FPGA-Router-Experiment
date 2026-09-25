@@ -1,0 +1,710 @@
+<!doctype html>
+<html lang="zh" data-lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>FPGA 协商布线器 · FPGA Negotiated Router</title>
+<meta name="description" content="From-scratch FPGA routing engine: BFS / A* / Mikami-Tabuchi detail routing + parallel PathFinder negotiated routing." />
+<link rel="stylesheet" href="styles.css" />
+<script>
+  (function () {
+    try {
+      var t = localStorage.getItem('fpga-router-theme');
+      if (t !== 'dark' && t !== 'light') {
+        t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+      var l = localStorage.getItem('fpga-router-lang');
+      if (l === 'en' || l === 'zh') document.documentElement.setAttribute('data-lang', l);
+    } catch (e) {}
+  })();
+</script>
+</head>
+<body data-title-en="FPGA Negotiated Router · BFS / A* / Mikami + PathFinder" data-title-zh="FPGA 协商布线器 · BFS / A* / Mikami + PathFinder">
+
+<!-- ===================== HEADER ===================== -->
+<header class="site-header">
+  <div class="header-inner">
+    <a class="brand" href="index.html">
+      <span class="brand-name">FPGA Router</span>
+      <span class="brand-tag">
+        <span class="lang-en">Negotiated routing from global to parallel detailed routing</span>
+        <span class="lang-zh">从全局布线到并行详细布线的协商布线器</span>
+      </span>
+    </a>
+    <div class="header-actions">
+      <nav class="lang-switch" aria-label="Language">
+        <button type="button" data-lang-btn="en">English</button>
+        <span class="lang-sep">/</span>
+        <button type="button" data-lang-btn="zh">中文</button>
+      </nav>
+      <button id="themeToggle" class="theme-toggle" type="button" aria-label="Toggle theme" title="Toggle theme"><span id="themeIcon">🌙</span></button>
+    </div>
+  </div>
+</header>
+
+<div class="layout">
+  <!-- ---------- Sidebar TOC ---------- -->
+  <details class="toc" open>
+    <summary class="toc-summary"><span class="lang-en">Contents</span><span class="lang-zh">目录</span></summary>
+    <nav class="sidebar" aria-label="Table of contents">
+      <ul class="nav">
+        <li class="nav-feature"><a href="https://customized-computing.github.io/VLSI-FPGA/#/" target="_blank" rel="noopener"><span class="lang-en">Course site · VLSI-FPGA ↗</span><span class="lang-zh">课程主页 · VLSI-FPGA ↗</span></a></li>
+        <li><a href="algorithms.html"><span class="lang-en">Algorithm principles →</span><span class="lang-zh">算法原理详解 →</span></a></li>
+        <li><a href="#visualization"><span class="lang-en">Interactive visualization</span><span class="lang-zh">交互式可视化</span></a></li>
+        <li><a href="#background"><span class="lang-en">Background &amp; modeling</span><span class="lang-zh">项目背景与建模</span></a></li>
+        <li><a href="#algorithms"><span class="lang-en">Algorithm modules</span><span class="lang-zh">算法模块</span></a></li>
+        <li><a href="#results"><span class="lang-en">Results</span><span class="lang-zh">实验结果</span></a></li>
+        <li><a href="#memory"><span class="lang-en">Memory analysis</span><span class="lang-zh">内存分析</span></a></li>
+        <li><a href="#structure"><span class="lang-en">Repository structure</span><span class="lang-zh">仓库结构</span></a></li>
+        <li><a href="#build"><span class="lang-en">Build &amp; run</span><span class="lang-zh">构建与运行</span></a></li>
+        <li><a href="#figures"><span class="lang-en">Figure gallery</span><span class="lang-zh">图库</span></a></li>
+      </ul>
+    </nav>
+  </details>
+
+  <!-- ---------- Content ---------- -->
+  <main class="content">
+    <article class="markdown-body">
+
+      <!-- ---------- HERO ---------- -->
+      <section class="hero" id="top">
+        <span class="badge">
+          <span class="dot"></span>
+          <span class="lang-en">VLSI Design course project</span>
+          <span class="lang-zh">VLSI 设计导论课程项目</span>
+        </span>
+        <h1>
+          <span class="lang-en">FPGA <span class="grad">Negotiated Router</span><br />from global to parallel detailed routing</span>
+          <span class="lang-zh">FPGA <span class="grad">协商布线器</span><br />从全局布线到并行详细布线</span>
+        </h1>
+        <p class="lead">
+          <span class="lang-en">A from-scratch C++17 routing engine that decomposes multi-terminal nets with Kruskal MST, routes them with BFS / A* / Mikami-Tabuchi, and removes congestion with a parallel PathFinder negotiated router driven by OpenMP.</span>
+          <span class="lang-zh">一个从零实现的 C++17 布线引擎：用 Kruskal 最小生成树拆分多端线网，以 BFS / A* / Mikami-Tabuchi 完成详细布线，并通过 OpenMP 并行的 PathFinder 协商布线消除拥塞。</span>
+        </p>
+        <p>
+          <span class="lang-en">Course site: <a href="https://customized-computing.github.io/VLSI-FPGA/#/" target="_blank" rel="noopener">customized-computing.github.io/VLSI-FPGA</a></span>
+          <span class="lang-zh">课程主页：<a href="https://customized-computing.github.io/VLSI-FPGA/#/" target="_blank" rel="noopener">customized-computing.github.io/VLSI-FPGA</a></span>
+        </p>
+        <div class="stack">
+          <span class="chip">C++17</span>
+          <span class="chip">OpenMP</span>
+          <span class="chip">CMake</span>
+          <span class="chip">Kruskal MST</span>
+          <span class="chip">A* / Manhattan</span>
+          <span class="chip">Mikami-Tabuchi</span>
+          <span class="chip">PathFinder</span>
+          <span class="chip">SVG</span>
+        </div>
+        <div class="cta">
+          <a class="btn btn-primary" href="https://customized-computing.github.io/VLSI-FPGA/#/" target="_blank" rel="noopener">
+            <span class="lang-en">Course site</span>
+            <span class="lang-zh">课程主页</span>
+          </a>
+          <a class="btn" href="#visualization">
+            <span class="lang-en">Interactive visualization</span>
+            <span class="lang-zh">交互式可视化</span>
+          </a>
+          <a class="btn" href="algorithms.html">
+            <span class="lang-en">Algorithm principles</span>
+            <span class="lang-zh">算法原理详解</span>
+          </a>
+        </div>
+      </section>
+
+      <!-- ---------- VISUALIZATION (prominent) ---------- -->
+      <section id="visualization">
+        <div class="section-head">
+          <span class="eyebrow"><span class="lang-en">Interactive</span><span class="lang-zh">交互</span></span>
+          <h2><span class="lang-en">Interactive routing visualization</span><span class="lang-zh">交互式布线可视化</span></h2>
+          <p>
+            <span class="lang-en">Replay sampled negotiated-routing states for three scenarios. Pick a scenario, drag the step slider or press play, and switch between the occupancy heatmap and the congestion map. The curves below the grid track congestion and resource usage over the iterations.</span>
+            <span class="lang-zh">回放三个场景的协商布线抽样状态。选择场景、拖动步骤滑条或点击播放，并在“热力图 / 拥塞图”之间切换。网格下方的曲线跟踪迭代过程中的拥塞与资源占用。</span>
+          </p>
+        </div>
+
+        <div class="viz-shell">
+          <div class="viz-panel">
+            <div class="field">
+              <label class="field-label" for="scenarioSelect"><span class="lang-en">Scenario</span><span class="lang-zh">场景</span></label>
+              <select id="scenarioSelect">
+                <option value="huge">huge</option>
+                <option value="large_dense">large_dense</option>
+                <option value="large_sparse">large_sparse</option>
+              </select>
+            </div>
+
+            <div class="field">
+              <label class="field-label" for="stepRange"><span class="lang-en">Step</span><span class="lang-zh">步骤</span></label>
+              <input id="stepRange" type="range" min="0" max="0" value="0" />
+              <div class="step-meta">
+                <span id="stepText">0 / 0</span>
+                <span id="stepLabel">—</span>
+              </div>
+            </div>
+
+            <div class="field">
+              <label class="field-label"><span class="lang-en">Display</span><span class="lang-zh">显示模式</span></label>
+              <div class="seg-toggle" id="modeToggle">
+                <button type="button" data-mode="heat" class="active"><span class="lang-en">Heatmap</span><span class="lang-zh">热力图</span></button>
+                <button type="button" data-mode="congestion"><span class="lang-en">Congestion</span><span class="lang-zh">拥塞图</span></button>
+              </div>
+            </div>
+
+            <div class="field viz-buttons">
+              <button type="button" id="playBtn" class="btn btn-primary">
+                <span id="playIcon">▶</span>
+                <span id="playLabel"><span class="lang-en">Play</span><span class="lang-zh">播放</span></span>
+              </button>
+              <button type="button" id="resetBtn" class="btn">
+                <span class="lang-en">Reset</span><span class="lang-zh">重置</span>
+              </button>
+            </div>
+
+            <div class="viz-stats">
+              <div class="stat-box"><div class="k"><span class="lang-en">Grid</span><span class="lang-zh">网格</span></div><div class="v" id="statGrid">—</div></div>
+              <div class="stat-box"><div class="k">Tracks (W)</div><div class="v" id="statTracks">—</div></div>
+              <div class="stat-box wide"><div class="k"><span class="lang-en">Resource usage</span><span class="lang-zh">资源占用</span></div><div class="v" id="statUsage">—</div></div>
+            </div>
+
+            <div class="viz-status" id="vizStatus"></div>
+          </div>
+
+          <div class="viz-main">
+            <div class="viz-canvas-wrap">
+              <svg id="gridSvg" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Routing grid"></svg>
+            </div>
+            <div class="legend">
+              <span><span class="swatch" id="legendLow"></span><span class="lang-en">low</span><span class="lang-zh">低</span></span>
+              <span><span class="swatch" id="legendHigh"></span><span class="lang-en">high</span><span class="lang-zh">高</span></span>
+              <span class="muted lang-en">Cell = tile · color = selected metric</span>
+              <span class="muted lang-zh">每格 = 一个 tile · 颜色 = 当前指标</span>
+            </div>
+
+            <div class="chart-card">
+              <div class="chart-title"><span class="lang-en">Congestion history (↓) · magenta</span><span class="lang-zh">拥塞下降曲线（↓）· 品红</span></div>
+              <svg id="congestionChart" viewBox="0 0 600 130" preserveAspectRatio="none"></svg>
+            </div>
+            <div class="chart-card">
+              <div class="chart-title"><span class="lang-en">Resource usage history (↑) · cyan</span><span class="lang-zh">资源占用上升曲线（↑）· 青色</span></div>
+              <svg id="usageChart" viewBox="0 0 600 130" preserveAspectRatio="none"></svg>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid grid-2" style="margin-top:18px">
+          <div class="card">
+            <h3><span class="lang-en">Heatmap mode</span><span class="lang-zh">热力图模式</span></h3>
+            <p class="lang-en">Each tile is colored by <code>occupancy / capacity</code>. Low usage → deep blue; rising usage → blue → purple → magenta; near-full tiles → red/pink.</p>
+            <p class="lang-zh">每个 tile 按 <code>占用 / 容量</code> 着色。低占用为深蓝，随占用升高依次为蓝 → 紫 → 品红，接近占满为红/粉。</p>
+          </div>
+          <div class="card">
+            <h3><span class="lang-en">Congestion mode</span><span class="lang-zh">拥塞图模式</span></h3>
+            <p class="lang-en">Each tile is colored by its congestion ratio. No overflow → dark; increasing overflow → amber → red. Red hotspots are the conflict points negotiation must resolve.</p>
+            <p class="lang-zh">每个 tile 按拥塞比例着色。无溢出为深色，溢出升高依次为琥珀 → 红。红色热点即协商布线需要化解的冲突点。</p>
+          </div>
+        </div>
+        <p class="table-note">
+          <span class="lang-en">The viewer loads sampled states from <code>docs/data/*.json</code>; the grid cell is one tile and the two line charts are colored magenta (congestion) and cyan (resource usage).</span>
+          <span class="lang-zh">查看器从 <code>docs/data/*.json</code> 加载抽样状态；网格每格为一个 tile，两条折线分别以品红（拥塞）和青色（资源占用）绘制。</span>
+        </p>
+      </section>
+
+      <!-- ---------- BACKGROUND ---------- -->
+      <section id="background">
+        <div class="section-head">
+          <span class="eyebrow"><span class="lang-en">Modeling</span><span class="lang-zh">建模</span></span>
+          <h2><span class="lang-en">Background &amp; RR-graph modeling</span><span class="lang-zh">项目背景与 RR graph 建模</span></h2>
+          <p>
+            <span class="lang-en">The FPGA is modeled as an N×N tile grid. Each tile hosts a routing-resource (RR) graph whose nodes are wire segments and logic pins, and whose edges are programmable switches. Routing assigns every net to a set of non-conflicting RR nodes.</span>
+            <span class="lang-zh">FPGA 被建模为 N×N 的 tile 网格。每个 tile 内是一张布线资源（RR）图：节点是导线段与逻辑引脚，边是可编程开关。布线为每条线网分配一组互不冲突的 RR 节点。</span>
+          </p>
+        </div>
+
+        <div class="grid grid-3">
+          <div class="card">
+            <div class="icon">▬</div>
+            <h3>H_WIRE</h3>
+            <p class="lang-en">Horizontal wire segment inside a tile — a horizontal routing resource.</p>
+            <p class="lang-zh">tile 内的水平导线段，表示一条水平方向的布线资源。</p>
+            <span class="tag">rrType</span>
+          </div>
+          <div class="card">
+            <div class="icon">▮</div>
+            <h3>V_WIRE</h3>
+            <p class="lang-en">Vertical wire segment inside a tile — a vertical routing resource.</p>
+            <p class="lang-zh">tile 内的垂直导线段，表示一条垂直方向的布线资源。</p>
+            <span class="tag">rrType</span>
+          </div>
+          <div class="card">
+            <div class="icon">◆</div>
+            <h3>CB_WIRE</h3>
+            <p class="lang-en">Connection-block / logic pin — the entry and exit point of a net.</p>
+            <p class="lang-zh">连接块与逻辑引脚，是线网的入口与出口。</p>
+            <span class="tag">rrType</span>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:18px">
+          <h3><span class="lang-en">Routing flow</span><span class="lang-zh">布线流程</span></h3>
+          <dl class="kv">
+            <dt><span class="lang-en">Global routing</span><span class="lang-zh">全局布线</span></dt>
+            <dd>sortNets()</dd>
+            <dt><span class="lang-en">Net decomposition</span><span class="lang-zh">线网拆分</span></dt>
+            <dd>Kruskal MST</dd>
+            <dt><span class="lang-en">Detailed routing</span><span class="lang-zh">详细布线</span></dt>
+            <dd>BFS / A* / Mikami-Tabuchi</dd>
+            <dt><span class="lang-en">Congestion removal</span><span class="lang-zh">拥塞消除</span></dt>
+            <dd>NegotiatedRouter (PathFinder)</dd>
+            <dt><span class="lang-en">Parallelism</span><span class="lang-zh">并行化</span></dt>
+            <dd>OpenMP route-in-parallel, commit-in-serial</dd>
+          </dl>
+          <p style="margin-top:14px">
+            <a href="algorithms.html#model"><span class="lang-en">Read the detailed modeling notes →</span><span class="lang-zh">阅读详细建模说明 →</span></a>
+          </p>
+        </div>
+      </section>
+
+      <!-- ---------- ALGORITHMS ---------- -->
+      <section id="algorithms">
+        <div class="section-head">
+          <span class="eyebrow"><span class="lang-en">Algorithms</span><span class="lang-zh">算法</span></span>
+          <h2><span class="lang-en">Algorithm building blocks</span><span class="lang-zh">算法模块</span></h2>
+          <p>
+            <span class="lang-en">Each stage is implemented independently and can be inspected in isolation, from graph decomposition to the congestion-aware negotiated cost function. Follow each card for the full principle, pseudocode and complexity.</span>
+            <span class="lang-zh">每个阶段都独立实现、可单独检查：从图分解，到拥塞感知的协商代价函数。点击卡片可查看完整原理、伪代码与复杂度。</span>
+          </p>
+        </div>
+
+        <div class="grid grid-3">
+          <a class="card card-link" href="algorithms.html#sortnets">
+            <div class="icon">⇅</div>
+            <h3><span class="lang-en">Global routing · sortNets</span><span class="lang-zh">全局布线 · sortNets</span></h3>
+            <p class="lang-en">Sort nets in ascending order by the number of global pins inside their bounding box, so that tightly-bounded nets are routed first.</p>
+            <p class="lang-zh">按线网 bounding box 内全局引脚数升序排序，让约束更紧的线网先布线。</p>
+            <span class="tag">O(n log n)</span>
+          </a>
+          <a class="card card-link" href="algorithms.html#mst">
+            <div class="icon">⌘</div>
+            <h3><span class="lang-en">Kruskal MST decomposition</span><span class="lang-zh">Kruskal MST 拆分</span></h3>
+            <p class="lang-en">Decompose each multi-terminal net into two-terminal segments by building a minimum spanning tree with Manhattan-distance edge weights.</p>
+            <p class="lang-zh">以 Manhattan 距离为边权构建最小生成树，将多端线网拆成两两连接的线段。</p>
+            <span class="tag">union-find</span>
+          </a>
+          <a class="card card-link" href="algorithms.html#bfs">
+            <div class="icon">↯</div>
+            <h3><span class="lang-en">BFS detail routing</span><span class="lang-zh">BFS 详细布线</span></h3>
+            <p class="lang-en">Breadth-first search on the RR graph finds a shortest-hop path, used as the backward-compatible default (<code>my</code> → <code>bfs</code>).</p>
+            <p class="lang-zh">在 RR 图上做广度优先搜索，得到跳数最短路径；作为向后兼容的默认方法（<code>my</code> → <code>bfs</code>）。</p>
+            <span class="tag">shortest-hop</span>
+          </a>
+          <a class="card card-link" href="algorithms.html#astar">
+            <div class="icon">★</div>
+            <h3><span class="lang-en">A* detail routing</span><span class="lang-zh">A* 详细布线</span></h3>
+            <p class="lang-en">A* search guided by a Manhattan-distance heuristic with a closed set; optimal for each two-terminal pair.</p>
+            <p class="lang-zh">使用 Manhattan 启发式与 closed 集的 A*，对单个两端问题最优。</p>
+            <span class="tag">a* ≡ astar</span>
+          </a>
+          <a class="card card-link" href="algorithms.html#mikami">
+            <div class="icon">⟷</div>
+            <h3><span class="lang-en">Mikami-Tabuchi</span><span class="lang-zh">Mikami-Tabuchi</span></h3>
+            <p class="lang-en">A double-end line-search that expands by node type (H_WIRE / V_WIRE / CB_WIRE), giving short wires and strong scaling on large designs.</p>
+            <p class="lang-zh">按节点类型（H_WIRE / V_WIRE / CB_WIRE）扩展的双端线搜索，线长更短，在大规模设计上扩展性更好。</p>
+            <span class="tag">double-end</span>
+          </a>
+          <a class="card card-link" href="algorithms.html#pathfinder">
+            <div class="icon">⚡</div>
+            <h3><span class="lang-en">PathFinder + OpenMP</span><span class="lang-zh">PathFinder + OpenMP</span></h3>
+            <p class="lang-en">Negotiated routing with cost <code>cost(v,t) = (1+h(v))·p(v,t)·(1+0.1t)</code>. Nets are routed in parallel and committed serially.</p>
+            <p class="lang-zh">协商布线采用代价 <code>cost(v,t) = (1+h(v))·p(v,t)·(1+0.1t)</code>；线网并行路由、串行提交。</p>
+            <span class="tag">#pragma omp parallel</span>
+          </a>
+        </div>
+      </section>
+
+      <!-- ---------- RESULTS ---------- -->
+      <section id="results">
+        <div class="section-head">
+          <span class="eyebrow"><span class="lang-en">Measured results</span><span class="lang-zh">实测结果</span></span>
+          <h2><span class="lang-en">Experiment results</span><span class="lang-zh">实验结果</span></h2>
+        </div>
+
+        <!-- A -->
+        <div class="table-block">
+          <div class="table-wrap">
+            <table>
+              <caption><span class="lang-en">A. Detail-routing comparison (W = 30)</span><span class="lang-zh">A. 详细布线对比（W = 30）</span></caption>
+              <thead>
+                <tr>
+                  <th>benchmark</th>
+                  <th><span class="lang-en">method</span><span class="lang-zh">方法</span></th>
+                  <th><span class="lang-en">connected / total</span><span class="lang-zh">成功连接/总连接</span></th>
+                  <th>Segments</th>
+                  <th><span class="lang-en">verify</span><span class="lang-zh">验证</span></th>
+                  <th><span class="lang-en">time (s)</span><span class="lang-zh">耗时(s)</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td class="mono">lg_sparse</td><td class="mono">bfs</td><td>338/338</td><td>4056</td><td class="pass"><span class="lang-en">passed</span><span class="lang-zh">通过</span></td><td>1</td></tr>
+                <tr><td class="mono">lg_sparse</td><td class="mono">astar</td><td>338/338</td><td>4067</td><td class="pass"><span class="lang-en">passed</span><span class="lang-zh">通过</span></td><td>1</td></tr>
+                <tr><td class="mono">lg_sparse</td><td class="mono">mikami</td><td>338/338</td><td>4062</td><td class="pass"><span class="lang-en">passed</span><span class="lang-zh">通过</span></td><td>1</td></tr>
+                <tr><td class="mono">large_dense</td><td class="mono">bfs</td><td>1028/1028</td><td>11939</td><td class="pass"><span class="lang-en">passed</span><span class="lang-zh">通过</span></td><td>3</td></tr>
+                <tr><td class="mono">large_dense</td><td class="mono">astar</td><td>1028/1028</td><td>11968</td><td class="pass"><span class="lang-en">passed</span><span class="lang-zh">通过</span></td><td>2</td></tr>
+                <tr><td class="mono">large_dense</td><td class="mono">mikami</td><td>1028/1028</td><td>11945</td><td class="pass"><span class="lang-en">passed</span><span class="lang-zh">通过</span></td><td>2</td></tr>
+                <tr><td class="mono">huge</td><td class="mono">bfs</td><td>2307/2307</td><td>46819</td><td class="pass"><span class="lang-en">passed</span><span class="lang-zh">通过</span></td><td>37</td></tr>
+                <tr><td class="mono">huge</td><td class="mono">astar</td><td>2307/2307</td><td>46928</td><td class="pass"><span class="lang-en">passed</span><span class="lang-zh">通过</span></td><td>23</td></tr>
+                <tr><td class="mono">huge</td><td class="mono">mikami</td><td>2307/2307</td><td>46769</td><td class="pass"><span class="lang-en">passed</span><span class="lang-zh">通过</span></td><td>22</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="table-note">
+            <span class="lang-en">All three methods complete and verify on the three benchmarks, with wire-length differences &lt; 1.5%. On <code>huge</code>, <code>mikami</code> is the fastest and yields the shortest wire length.</span>
+            <span class="lang-zh">三种方法在三个 benchmark 上均完成并验证通过，线长差异 &lt; 1.5%。在 <code>huge</code> 上，<code>mikami</code> 最快且线长最短。</span>
+          </p>
+        </div>
+
+        <!-- B -->
+        <div class="table-block">
+          <div class="table-wrap">
+            <table>
+              <caption><span class="lang-en">B. Detail routing at W = 25 (large_dense)</span><span class="lang-zh">B. W = 25 详细布线（large_dense）</span></caption>
+              <thead>
+                <tr>
+                  <th><span class="lang-en">method</span><span class="lang-zh">方法</span></th>
+                  <th><span class="lang-en">connected / total</span><span class="lang-zh">成功连接/总连接</span></th>
+                  <th>Segments</th>
+                  <th><span class="lang-en">verify</span><span class="lang-zh">验证</span></th>
+                  <th><span class="lang-en">time (s)</span><span class="lang-zh">耗时(s)</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td class="mono">bfs</td><td>1028/1028</td><td>12043</td><td class="pass"><span class="lang-en">passed</span><span class="lang-zh">通过</span></td><td>6</td></tr>
+                <tr><td class="mono">astar</td><td>1028/1028</td><td>12180</td><td class="pass"><span class="lang-en">passed</span><span class="lang-zh">通过</span></td><td>1</td></tr>
+                <tr><td class="mono">mikami</td><td>1028/1028</td><td>12105</td><td class="pass"><span class="lang-en">passed</span><span class="lang-zh">通过</span></td><td>1</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="table-note">
+            <span class="lang-en">All three detail routers complete and verify at the tighter W = 25. The separate negotiated engine still does not converge on <code>large_dense</code> at W = 25 (table E).</span>
+            <span class="lang-zh">三种详细布线器在更紧的 W = 25 下均完成并验证通过。独立的协商布线引擎在 <code>large_dense</code> W = 25 下仍未收敛（见表 E）。</span>
+          </p>
+        </div>
+
+        <!-- C -->
+        <div class="table-block">
+          <div class="table-wrap">
+            <table>
+              <caption><span class="lang-en">C. Negotiated-routing convergence (med_dense, 16 threads, maxiter = 50)</span><span class="lang-zh">C. 协商布线收敛（med_dense, 16 线程, maxiter = 50）</span></caption>
+              <thead>
+                <tr>
+                  <th>W</th>
+                  <th><span class="lang-en">converged</span><span class="lang-zh">收敛</span></th>
+                  <th><span class="lang-en">iterations</span><span class="lang-zh">迭代</span></th>
+                  <th>Segments</th>
+                  <th><span class="lang-en">verify</span><span class="lang-zh">验证</span></th>
+                  <th><span class="lang-en">time (s)</span><span class="lang-zh">耗时(s)</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td>30</td><td class="pass">✅</td><td>39</td><td>2960</td><td class="pass"><span class="lang-en">passed</span><span class="lang-zh">通过</span></td><td>3</td></tr>
+                <tr><td>25</td><td class="pass">✅</td><td>35</td><td>2970</td><td class="pass"><span class="lang-en">passed</span><span class="lang-zh">通过</span></td><td>3</td></tr>
+                <tr><td>20</td><td class="fail">❌</td><td>50</td><td>2940</td><td class="fail">not complete</td><td>3</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="table-note">
+            <span class="lang-en">The critical channel width lies between W = 20 and W = 25.</span>
+            <span class="lang-zh">临界通道宽度位于 W = 20–25 之间。</span>
+          </p>
+        </div>
+
+        <!-- D -->
+        <div class="table-block">
+          <div class="table-wrap">
+            <table>
+              <caption><span class="lang-en">D. Parallel speedup (med_dense, W = 25, maxiter = 50)</span><span class="lang-zh">D. 并行加速比（med_dense, W = 25, maxiter = 50）</span></caption>
+              <thead>
+                <tr>
+                  <th><span class="lang-en">threads</span><span class="lang-zh">线程数</span></th>
+                  <th><span class="lang-en">iterations</span><span class="lang-zh">迭代</span></th>
+                  <th><span class="lang-en">time (s)</span><span class="lang-zh">耗时(s)</span></th>
+                  <th><span class="lang-en">speedup vs 4t</span><span class="lang-zh">相对 4 线程加速</span></th>
+                  <th>Segments</th>
+                  <th><span class="lang-en">verify</span><span class="lang-zh">验证</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td>4</td><td>35</td><td>7</td><td>1.00×</td><td>2970</td><td class="pass"><span class="lang-en">passed</span><span class="lang-zh">通过</span></td></tr>
+                <tr><td>8</td><td>35</td><td>4</td><td>1.75×</td><td>2970</td><td class="pass"><span class="lang-en">passed</span><span class="lang-zh">通过</span></td></tr>
+                <tr><td>16</td><td>35</td><td>3</td><td class="hi">2.33×</td><td>2970</td><td class="pass"><span class="lang-en">passed</span><span class="lang-zh">通过</span></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="table-note">
+            <span class="lang-en">Iteration count and solution quality (Segments = 2970) are identical across thread counts: parallelism does not change the result. Speedup is sub-linear (serial commit / Amdahl): 16 threads reach ~2.33× over 4 threads.</span>
+            <span class="lang-zh">各线程数下迭代数与解质量（Segments = 2970）完全一致，说明并行不改变结果。加速比低于线性（受串行提交 / Amdahl 限制）：16 线程相对 4 线程约 2.33×。</span>
+          </p>
+        </div>
+
+        <!-- E -->
+        <div class="table-block">
+          <div class="table-wrap">
+            <table>
+              <caption><span class="lang-en">E. Large-scale negotiated routing (18 threads, maxiter = 50)</span><span class="lang-zh">E. 大规模协商布线（18 线程, maxiter = 50）</span></caption>
+              <thead>
+                <tr>
+                  <th>benchmark</th>
+                  <th>W</th>
+                  <th><span class="lang-en">converged</span><span class="lang-zh">收敛</span></th>
+                  <th><span class="lang-en">iters</span><span class="lang-zh">迭代</span></th>
+                  <th><span class="lang-en">final congested nodes</span><span class="lang-zh">最终拥塞节点</span></th>
+                  <th>Segments</th>
+                  <th><span class="lang-en">verify</span><span class="lang-zh">验证</span></th>
+                  <th><span class="lang-en">time (s)</span><span class="lang-zh">耗时(s)</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td class="mono">lg_sparse</td><td>30</td><td class="pass">✅</td><td>20</td><td>0</td><td>4176</td><td class="pass"><span class="lang-en">passed</span><span class="lang-zh">通过</span></td><td>4</td></tr>
+                <tr><td class="mono">lg_sparse</td><td>25</td><td class="pass">✅</td><td>29</td><td>0</td><td>4181</td><td class="pass"><span class="lang-en">passed</span><span class="lang-zh">通过</span></td><td>6</td></tr>
+                <tr><td class="mono">large_dense</td><td>30</td><td class="fail">❌</td><td>50</td><td>170</td><td>12200</td><td class="fail">not complete</td><td>35</td></tr>
+                <tr><td class="mono">large_dense</td><td>25</td><td class="fail">❌</td><td>50</td><td>420</td><td>11949</td><td class="fail">not complete</td><td>31</td></tr>
+                <tr><td class="mono">huge</td><td>30</td><td class="fail">❌</td><td>50</td><td>431</td><td>48370</td><td class="fail">not complete</td><td>423</td></tr>
+                <tr><td class="mono">huge</td><td>25</td><td class="fail">❌</td><td>50</td><td>1202</td><td>47771</td><td class="fail">not complete</td><td>477</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="table-note">
+            <span class="lang-en">Only <code>lg_sparse</code> converges. For <code>large_dense</code>, W = 30 reduces congestion versus W = 25 (170 vs 420 nodes) but is still insufficient within 50 iterations; <code>huge</code> does not converge in either case.</span>
+            <span class="lang-zh">仅 <code>lg_sparse</code> 收敛。<code>large_dense</code> 在 W = 30 时拥塞较 W = 25 明显改善（170 vs 420），但 50 轮内仍不足；<code>huge</code> 两种情况均不收敛。</span>
+          </p>
+        </div>
+      </section>
+
+      <!-- ---------- MEMORY ---------- -->
+      <section id="memory">
+        <div class="section-head">
+          <span class="eyebrow"><span class="lang-en">Profiling</span><span class="lang-zh">剖析</span></span>
+          <h2><span class="lang-en">Memory analysis</span><span class="lang-zh">内存分析</span></h2>
+        </div>
+
+        <div class="grid grid-2">
+          <figure>
+            <img src="assets/massif_memory.png" alt="Massif memory usage profile" loading="lazy" />
+            <figcaption>
+              <strong class="lang-en">Valgrind Massif memory profile</strong>
+              <strong class="lang-zh">Valgrind Massif 内存剖析图</strong><br />
+              <span class="lang-en">Heap usage during negotiated routing on med_dense (W = 25, 16 threads).</span>
+              <span class="lang-zh">med_dense 协商布线期间的堆内存占用（W = 25，16 线程）。</span>
+            </figcaption>
+          </figure>
+          <div class="card">
+            <h3><span class="lang-en">Massif summary</span><span class="lang-zh">Massif 结论</span></h3>
+            <dl class="kv" style="margin-top:8px">
+              <dt><span class="lang-en">Peak memory</span><span class="lang-zh">峰值内存</span></dt><dd>13.26 MB</dd>
+              <dt><span class="lang-en">Final memory</span><span class="lang-zh">最终内存</span></dt><dd>10.67 MB</dd>
+              <dt><span class="lang-en">Useful heap</span><span class="lang-zh">有用堆</span></dt><dd>8.72 MB</dd>
+              <dt><span class="lang-en">Extra overhead</span><span class="lang-zh">额外开销</span></dt><dd>1.94 MB</dd>
+            </dl>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- STRUCTURE ---------- -->
+      <section id="structure">
+        <div class="section-head">
+          <span class="eyebrow"><span class="lang-en">Repository</span><span class="lang-zh">仓库</span></span>
+          <h2><span class="lang-en">Repository structure</span><span class="lang-zh">仓库结构</span></h2>
+        </div>
+        <div class="grid grid-2">
+          <pre class="lang-en"><span class="c"># core router sources</span>
+main.cpp              <span class="c"># CLI entry &amp; runtime dispatch</span>
+Solution.h / .cpp     <span class="c"># MyRouter: sortNets, MST, BFS/A*/Mikami</span>
+NegotiatedRouter.cpp  <span class="c"># PathFinder + OpenMP</span>
+Design / FPGA / FpgaTile / RRNode / Net
+vistual/VisualizationDump.cpp  <span class="c"># step JSON dumper</span>
+
+<span class="c"># benchmarks</span>
+benchmark/            <span class="c"># tiny … huge, xl</span>
+
+<span class="c"># experiments</span>
+scripts/run_experiments.sh   <span class="c"># → test_logs/*.log</span>
+scripts/parse_results.py     <span class="c"># → experiment_results.json</span>
+experiment_summary.md
+experiment_results.json
+
+<span class="c"># GitHub Pages site</span>
+docs/                 <span class="c"># this page</span>
+├── index.html
+├── algorithms.html   <span class="c"># algorithm principles</span>
+├── styles.css
+├── app.js
+├── assets/           <span class="c"># 7 PNG figures</span>
+└── data/             <span class="c"># huge / large_dense / large_sparse.json</span></pre>
+          <pre class="lang-zh"><span class="c"># 路由器核心源码</span>
+main.cpp              <span class="c"># 入口与运行时参数分派</span>
+Solution.h / .cpp     <span class="c"># MyRouter：sortNets、MST、BFS/A*/Mikami</span>
+NegotiatedRouter.cpp  <span class="c"># PathFinder + OpenMP</span>
+Design / FPGA / FpgaTile / RRNode / Net
+vistual/VisualizationDump.cpp  <span class="c"># 逐步 JSON dump</span>
+
+<span class="c"># benchmark</span>
+benchmark/            <span class="c"># tiny … huge, xl</span>
+
+<span class="c"># 实验脚本与结果</span>
+scripts/run_experiments.sh   <span class="c"># → test_logs/*.log</span>
+scripts/parse_results.py     <span class="c"># → experiment_results.json</span>
+experiment_summary.md
+experiment_results.json
+
+<span class="c"># GitHub Pages 静态站</span>
+docs/                 <span class="c"># 本页面</span>
+├── index.html
+├── algorithms.html   <span class="c"># 算法原理</span>
+├── styles.css
+├── app.js
+├── assets/           <span class="c"># 7 张 PNG 图</span>
+└── data/             <span class="c"># huge / large_dense / large_sparse.json</span></pre>
+        </div>
+      </section>
+
+      <!-- ---------- BUILD ---------- -->
+      <section id="build">
+        <div class="section-head">
+          <span class="eyebrow"><span class="lang-en">Usage</span><span class="lang-zh">使用</span></span>
+          <h2><span class="lang-en">Build &amp; run</span><span class="lang-zh">构建与运行</span></h2>
+          <p>
+            <span class="lang-en">Build with CMake, then select the router type at runtime. <code>visual</code> defaults to <code>false</code>.</span>
+            <span class="lang-zh">使用 CMake 构建，运行时选择路由器类型。<code>visual</code> 默认为 <code>false</code>。</span>
+          </p>
+        </div>
+
+        <pre><span class="c"># build</span>
+cmake -S . -B build &amp;&amp; cmake --build build -j
+
+<span class="c"># usage</span>
+./build/main &lt;circuit&gt; &lt;W&gt; [out_dir] [router_type] [maxiter] [threads] [visual]
+
+<span class="c"># detail routing</span>
+./build/main ./benchmark/huge 30 out <span class="k">bfs</span>      <span class="c"># alias: my</span>
+./build/main ./benchmark/huge 30 out <span class="k">astar</span>    <span class="c"># alias: a*</span>
+./build/main ./benchmark/huge 30 out <span class="k">mikami</span>
+
+<span class="c"># negotiated routing</span>
+./build/main ./benchmark/med_dense 25 out <span class="k">negotiated</span> 50 16 <span class="s">false</span>
+
+<span class="c"># reproduce the experiment</span>
+bash scripts/run_experiments.sh   <span class="c"># → test_logs/*.log</span>
+python3 scripts/parse_results.py  <span class="c"># → experiment_results.json</span></pre>
+
+        <div class="table-wrap" style="margin-top:20px">
+          <table>
+            <thead>
+              <tr>
+                <th><span class="lang-en">argument</span><span class="lang-zh">参数</span></th>
+                <th><span class="lang-en">meaning</span><span class="lang-zh">含义</span></th>
+                <th><span class="lang-en">default</span><span class="lang-zh">默认</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td class="mono">circuit</td><td><span class="lang-en">benchmark file path</span><span class="lang-zh">benchmark 文件路径</span></td><td>—</td></tr>
+              <tr><td class="mono">W</td><td><span class="lang-en">routing channel width</span><span class="lang-zh">布线通道宽度</span></td><td>—</td></tr>
+              <tr><td class="mono">out_dir</td><td><span class="lang-en">output directory</span><span class="lang-zh">输出目录</span></td><td class="mono">annual_results</td></tr>
+              <tr><td class="mono">router_type</td><td><span class="lang-en">bfs | my · astar | a* · mikami · negotiated</span><span class="lang-zh">bfs | my · astar | a* · mikami · negotiated</span></td><td class="mono">bfs</td></tr>
+              <tr><td class="mono">maxiter</td><td><span class="lang-en">max negotiated iterations</span><span class="lang-zh">协商布线最大迭代次数</span></td><td class="mono">30</td></tr>
+              <tr><td class="mono">threads</td><td><span class="lang-en">OpenMP threads (negotiated only)</span><span class="lang-zh">OpenMP 线程数（仅协商）</span></td><td class="mono">4</td></tr>
+              <tr><td class="mono">visual</td><td><span class="lang-en">write step JSON (negotiated only)</span><span class="lang-zh">输出逐步 JSON（仅协商）</span></td><td class="mono">false</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ---------- FIGURES (last) ---------- -->
+      <section id="figures">
+        <div class="section-head">
+          <span class="eyebrow"><span class="lang-en">Gallery</span><span class="lang-zh">图库</span></span>
+          <h2><span class="lang-en">Figure gallery</span><span class="lang-zh">图库</span></h2>
+          <p>
+            <span class="lang-en">Congestion and routing views captured during debugging.</span>
+            <span class="lang-zh">调试过程中捕获的拥塞与路由视图。</span>
+          </p>
+        </div>
+
+        <div class="grid grid-2">
+          <figure>
+            <img src="assets/astar_huge_net165_heatmap.png" alt="A* congestion heatmap on huge W=30 net165" loading="lazy" />
+            <figcaption>
+              <strong class="lang-en">A* · huge, W=30, net165</strong>
+              <strong class="lang-zh">A* · huge, W=30, net165</strong><br />
+              <span class="lang-en">Congestion heatmap around a routed net on the 41×41 <code>huge</code> benchmark.</span>
+              <span class="lang-zh">41×41 <code>huge</code> benchmark 上某条线网周围的拥塞热力图。</span>
+            </figcaption>
+          </figure>
+          <figure>
+            <img src="assets/bfs_large_dense_net349_heatmap.png" alt="BFS congestion heatmap on large_dense W=25 net349" loading="lazy" />
+            <figcaption>
+              <strong class="lang-en">BFS · large_dense, W=25, net349</strong>
+              <strong class="lang-zh">BFS · large_dense, W=25, net349</strong><br />
+              <span class="lang-en">Congestion heatmap of BFS detail routing on a dense 21×21 design.</span>
+              <span class="lang-zh">BFS 详细布线在密集 21×21 设计上的拥塞热力图。</span>
+            </figcaption>
+          </figure>
+          <figure>
+            <img src="assets/mikami_large_dense_net226_heatmap.png" alt="Mikami congestion heatmap on large_dense W=25 net226" loading="lazy" />
+            <figcaption>
+              <strong class="lang-en">Mikami-Tabuchi · large_dense, W=25, net226</strong>
+              <strong class="lang-zh">Mikami-Tabuchi · large_dense, W=25, net226</strong><br />
+              <span class="lang-en">Congestion heatmap for the Mikami-Tabuchi double-end search.</span>
+              <span class="lang-zh">Mikami-Tabuchi 双端线搜索的拥塞热力图。</span>
+            </figcaption>
+          </figure>
+          <figure>
+            <img src="assets/mikami_large_dense_net226_edges.png" alt="Mikami routing edges on large_dense W=25 net226" loading="lazy" />
+            <figcaption>
+              <strong class="lang-en">Mikami-Tabuchi · routing edges</strong>
+              <strong class="lang-zh">Mikami-Tabuchi · 路由边</strong><br />
+              <span class="lang-en">The same scenario, showing individual routing-edge detail.</span>
+              <span class="lang-zh">同一场景，展示具体的路由边细节。</span>
+            </figcaption>
+          </figure>
+          <figure>
+            <img src="assets/negotiated_congestion_heatmap.png" alt="Negotiated routing congestion heatmap" loading="lazy" />
+            <figcaption>
+              <strong class="lang-en">Negotiated routing · congestion heatmap</strong>
+              <strong class="lang-zh">协商布线 · 拥塞热力图</strong><br />
+              <span class="lang-en">Per-iteration congestion distribution of the parallel PathFinder router.</span>
+              <span class="lang-zh">并行 PathFinder 协商布线的逐迭代拥塞分布。</span>
+            </figcaption>
+          </figure>
+          <figure>
+            <img src="assets/negotiated_congestion_curve.png" alt="Negotiated routing congestion curve" loading="lazy" />
+            <figcaption>
+              <strong class="lang-en">Negotiated routing · congestion curve</strong>
+              <strong class="lang-zh">协商布线 · 拥塞曲线</strong><br />
+              <span class="lang-en">Congestion decreasing over iterations as historical cost pushes nets apart.</span>
+              <span class="lang-zh">随着历史代价把线网"推开"，拥塞随迭代逐步下降。</span>
+            </figcaption>
+          </figure>
+        </div>
+      </section>
+
+    </article>
+
+    <!-- ---------- FOOTER ---------- -->
+    <footer class="site-footer">
+      <div class="footer-inner">
+        <div>
+          <div class="lang-en">FPGA Negotiated Router · VLSI Design course project · <a href="https://customized-computing.github.io/VLSI-FPGA/#/" target="_blank" rel="noopener">course site</a></div>
+          <div class="lang-zh">FPGA 协商布线器 · VLSI 设计导论课程项目 · <a href="https://customized-computing.github.io/VLSI-FPGA/#/" target="_blank" rel="noopener">课程主页</a></div>
+        </div>
+        <div>
+          <div class="lang-en"><a href="algorithms.html">Algorithm principles</a></div>
+          <div class="lang-zh"><a href="algorithms.html">算法原理详解</a></div>
+        </div>
+      </div>
+    </footer>
+  </main>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
