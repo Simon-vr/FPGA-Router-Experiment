@@ -1,5 +1,7 @@
 # FPGA Negotiated Router
 
+**📖 Project docs & live demo: [https://simon-vr.github.io/FPGA-Router-Experiment/](https://simon-vr.github.io/FPGA-Router-Experiment/)**
+
 A teaching-oriented FPGA router that supports BFS / A* / Mikami–Tabuchi detailed routing and PathFinder-based negotiated routing with OpenMP parallelism.
 
 [中文文档](README.zh-CN.md)

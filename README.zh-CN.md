@@ -1,5 +1,7 @@
 # FPGA 协商布线器
 
+**📖 项目文档与在线演示：[https://simon-vr.github.io/FPGA-Router-Experiment/](https://simon-vr.github.io/FPGA-Router-Experiment/)**
+
 面向教学的 FPGA 布线器，支持 BFS / A* / Mikami–Tabuchi 详细布线与基于 PathFinder 的协商布线，并使用 OpenMP 并行加速。
 
 [English Docs](README.md)
